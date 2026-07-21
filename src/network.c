@@ -28,7 +28,7 @@
 #include "mbedtls_config.h"
 
 // ================================================================
-//  Cross-core packet queue: core0 IRQ producer -> core1 consumer (below)
+//  Definitions - Define the Wifi Network, Password, Broker, Port, Path, and topic
 // ================================================================
 #define PKT_QUEUE_LEN   8
 #define HOME_WIFI      "Breanna"
@@ -52,14 +52,18 @@ static volatile pkt_slot_t pkt_queue[PKT_QUEUE_LEN];
 static volatile uint32_t   pkt_write_idx = 0;
 static volatile uint32_t   pkt_read_idx  = 0;
 
-// Public API - see network.h. Called from IRQ context on core0; must stay
-// fast and never block.
+// Takes the fully decoded received packets from the ao27.c in the other core and places
+// each packet into a small waiting line so the main networking loop can handle
+// it later without blocking the interrupt path.
 void network_push_packet(const uint8_t *data, uint16_t len) {
     uint32_t next = (pkt_write_idx + 1) % PKT_QUEUE_LEN;
     if (next == pkt_read_idx) {
         return; // queue full - drop rather than stall the caller
     }
-    if (len > NETWORK_PKT_MAX_LEN) len = NETWORK_PKT_MAX_LEN;
+
+    if (len > NETWORK_PKT_MAX_LEN) {
+        len = NETWORK_PKT_MAX_LEN;
+    }
     memcpy((void *)pkt_queue[pkt_write_idx].data, data, len);
     pkt_queue[pkt_write_idx].len = len;
     __sync_synchronize(); // publish the data write before the index update
@@ -67,13 +71,18 @@ void network_push_packet(const uint8_t *data, uint16_t len) {
 }
 
 // Internal - only ever called from network_task()'s own loop on core1.
+// Removes one queued packet from the waiting line and hands it to the
+// main loop so it can be sent out to the broker.
 static bool pkt_queue_pop(uint8_t *out, uint16_t *out_len) {
-    if (pkt_read_idx == pkt_write_idx) return false;
+    if (pkt_read_idx == pkt_write_idx) {
+        return false;
+    }
     uint16_t len = pkt_queue[pkt_read_idx].len;
     memcpy(out, (void *)pkt_queue[pkt_read_idx].data, len);
     *out_len = len;
     __sync_synchronize();
     pkt_read_idx = (pkt_read_idx + 1) % PKT_QUEUE_LEN;
+
     return true;
 }
 
@@ -99,11 +108,11 @@ static uint8_t  ws_rx_buf[2048];
 static size_t   ws_rx_len = 0;
 static size_t   ws_rx_pos = 0;
 
+// Hard-stop fallback - loops until a valid connection found
 static void net_die(const char *msg) {
     // Repeat instead of printing once - if the serial monitor gets attached
     // a moment after this fires, a one-shot message would be gone forever.
-    // Packet capture on core0 keeps running regardless; only networking
-    // is stuck here.
+
     while (1) {
         printf("FATAL (net): %s\n", msg);
         cyw43_arch_poll();
@@ -111,21 +120,22 @@ static void net_die(const char *msg) {
     }
 }
 
+// Turns a TLS library error into a clearer message and then calls the
+// main fatal handler so the network task stops cleanly.
 static void mbedtls_die(const char *msg, int ret) {
     printf("FATAL (net): %s (mbedtls error -0x%04x)\n", msg, -ret);
     net_die(msg);
 }
 
-// ---------------- wifi ----------------
+// Connects the Pico to Wi-Fi using the Wifi name and definition
 static void wifi_connect(void) {
     if (cyw43_arch_init()) {
-        net_die("cyw43_arch_init failed");
+        net_die("cyw43_arch_init failed");  
     }
-    cyw43_arch_enable_sta_mode();
+    cyw43_arch_enable_sta_mode(); //enables wifi station mode
 
     printf("Connecting to wifi: %s\n", HOME_WIFI);
-    int rc = cyw43_arch_wifi_connect_timeout_ms(
-        HOME_WIFI, HOME_PASS, CYW43_AUTH_WPA2_AES_PSK, 30000);
+    int rc = cyw43_arch_wifi_connect_timeout_ms(HOME_WIFI, HOME_PASS, CYW43_AUTH_WPA2_AES_PSK, 30000);
     if (rc) {
         net_die("wifi connect failed/timed out");
     }
@@ -136,20 +146,28 @@ static void wifi_connect(void) {
 static ip_addr_t        g_resolved_ip;
 static volatile bool    g_dns_done = false;
 
+// Callback that runs after DNS finishes looking up a host.
+// It saves the address that was found so the main code can use it.
 static void dns_found_cb(const char *name, const ip_addr_t *ipaddr, void *arg) {
     (void)name; (void)arg;
     if (ipaddr) g_resolved_ip = *ipaddr;
     g_dns_done = true;
 }
 
+// Asks DNS for the broker's address and waits briefly until an answer comes
+// since broker is named by text, not number.
 static bool resolve_host(const char *host, ip_addr_t *out) {
     g_dns_done = false;
     cyw43_arch_lwip_begin();
     err_t err = dns_gethostbyname(host, out, dns_found_cb, NULL);
     cyw43_arch_lwip_end();
 
-    if (err == ERR_OK) return true;
-    if (err != ERR_INPROGRESS) return false;
+    if (err == ERR_OK) {
+        return true;
+    }
+    if (err != ERR_INPROGRESS) {
+        return false;
+    }
 
     absolute_time_t deadline = make_timeout_time_ms(10000);
     while (!g_dns_done) {
@@ -162,12 +180,15 @@ static bool resolve_host(const char *host, ip_addr_t *out) {
 }
 
 // ---------------- raw lwIP TCP connect ----------------
+// Called whenever new TCP data arrives. 
+// copies the incoming bytes into a local buffer so the higher-level TLS and WebSocket code can read them.
 static err_t on_tcp_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     raw_conn_t *c = (raw_conn_t *)arg;
     if (!p) {
         c->error = true;
         return ERR_OK;
     }
+
     if (err != ERR_OK) {
         pbuf_free(p);
         return err;
@@ -192,12 +213,16 @@ static err_t on_tcp_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t 
     return ERR_OK;
 }
 
+// Marks the TCP connection as broken when the low-level stack reports an error
+// Lets the rest of the code stop trying to use a dead connection.
 static void on_tcp_err(void *arg, err_t err) {
     (void)err;
     raw_conn_t *c = (raw_conn_t *)arg;
     c->error = true;
 }
 
+// Called once the TCP connect attempt finishes. 
+// returns a the flag ERR_OK so the code knows the socket is ready to use.
 static err_t on_tcp_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
     (void)tpcb;
     raw_conn_t *c = (raw_conn_t *)arg;
@@ -205,9 +230,13 @@ static err_t on_tcp_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
     return ERR_OK;
 }
 
+// Opens the raw TCP connection to the broker and waits until it is either ready or clearly failed.
+//  TLS steps cannot start without a live socket.
 static void tcp_connect_blocking(const char *host, int port) {
     ip_addr_t addr;
-    if (!resolve_host(host, &addr)) net_die("DNS lookup failed");
+    if (!resolve_host(host, &addr)) {
+        net_die("DNS lookup failed");
+    }
 
     memset(&g_conn, 0, sizeof(g_conn));
 
@@ -223,7 +252,9 @@ static void tcp_connect_blocking(const char *host, int port) {
     err_t err = tcp_connect(g_conn.pcb, &addr, (u16_t)port, on_tcp_connected);
     cyw43_arch_lwip_end();
 
-    if (err != ERR_OK) net_die("tcp_connect failed");
+    if (err != ERR_OK) {
+        net_die("tcp_connect failed");
+    }
 
     absolute_time_t deadline = make_timeout_time_ms(10000);
     while (!g_conn.connected && !g_conn.error) {
@@ -233,18 +264,25 @@ static void tcp_connect_blocking(const char *host, int port) {
             net_die("tcp connect timed out");
         }
     }
-    if (g_conn.error) net_die("tcp connect failed (reset/refused)");
+    if (g_conn.error) {
+        net_die("tcp connect failed (reset/refused)");
+    }
 }
 
 // ---------------- mbedtls bio glue (drives the raw tcp_pcb above) ----------------
 #define NET_SEND_FAILED  -0x0001
 
+// This is the send side for the TLS layer. It takes bytes from mbedtls and
+// pushes them onto the TCP connection, which is how secure traffic leaves the device.
 static int net_send(void *ctx, const unsigned char *buf, size_t len) {
     (void)ctx;
     cyw43_arch_poll();
-    if (g_conn.error) return NET_SEND_FAILED;
-    if (tcp_sndbuf(g_conn.pcb) < len) return MBEDTLS_ERR_SSL_WANT_WRITE;
-
+    if (g_conn.error) {
+        return NET_SEND_FAILED;
+    }
+    if (tcp_sndbuf(g_conn.pcb) < len) {
+        return MBEDTLS_ERR_SSL_WANT_WRITE;
+    }
     cyw43_arch_lwip_begin();
     err_t err = tcp_write(g_conn.pcb, buf, (u16_t)len, TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) tcp_output(g_conn.pcb);
@@ -254,6 +292,8 @@ static int net_send(void *ctx, const unsigned char *buf, size_t len) {
     return (int)len;
 }
 
+// Receive side for the TLS layer that gives mbedtls bytes that
+// were already collected from the TCP connection so it can keep reading safely.
 static int net_recv(void *ctx, unsigned char *buf, size_t len) {
     (void)ctx;
     cyw43_arch_poll();
@@ -269,6 +309,8 @@ static int net_recv(void *ctx, unsigned char *buf, size_t len) {
 }
 
 // pico has no OS entropy source -> feed the hardware RNG into mbedtls
+// Provides random bytes to the TLS library. It is needed because the
+// secure connection uses those bytes when creating keys and other crypto material.
 static int hw_entropy_source(void *data, unsigned char *output, size_t len, size_t *olen) {
     (void)data;
     for (size_t i = 0; i < len; i++) {
@@ -278,6 +320,9 @@ static int hw_entropy_source(void *data, unsigned char *output, size_t len, size
     return 0;
 }
 
+// Sets up the TLS layer on top of the raw TCP connection. It prepares
+// the crypto settings, performs the handshake, and turns the socket into a
+// secure channel for later traffic.
 static void tls_wrap(void) {
     mbedtls_ssl_init(&g_ssl);
     mbedtls_ssl_config_init(&g_conf);
@@ -316,6 +361,8 @@ static void tls_wrap(void) {
     printf("TLS handshake complete.\n");
 }
 
+// Sends bytes until the whole message is handed to the TLS layer.
+// It is needed because the secure socket may only accept a chunk at a time.
 static int tls_write_all(const uint8_t *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -327,6 +374,8 @@ static int tls_write_all(const uint8_t *data, size_t len) {
     return (int)sent;
 }
 
+// REads precise number of bytes from the secure stream. It is used when
+// the code needs an exact amount of data, such as a fixed-size response header.
 static int tls_read_exact(uint8_t *out, size_t len) {
     size_t got = 0;
     while (got < len) {
@@ -338,8 +387,8 @@ static int tls_read_exact(uint8_t *out, size_t len) {
     return (int)got;
 }
 
-// reads one line (up to and including '\n') off the TLS stream, used only
-// during the plaintext HTTP upgrade response
+// Reads one line from the secure stream until it reaches a newline. It is
+// used during the WebSocket upgrade step when the broker sends a text response.
 static int tls_read_line(char *out, size_t max) {
     size_t i = 0;
     while (i < max - 1) {
@@ -355,6 +404,8 @@ static int tls_read_line(char *out, size_t max) {
 }
 
 // ---------------- websocket framing ----------------
+// This wraps a chunk of bytes in a WebSocket frame before sending it. The frame
+// adds the message headers the broker expects so it can understand the data.
 static void ws_write(const uint8_t *data, size_t length) {
     uint8_t header[14];
     size_t hlen = 0;
@@ -393,6 +444,9 @@ static void ws_write(const uint8_t *data, size_t length) {
     }
 }
 
+// Pulls a requested amount of bytes out of the WebSocket receive buffer.
+// It is needed because the broker may send data in frames, and the code must
+// reassemble the message piece by piece.
 static void ws_read(uint8_t *out, size_t amt) {
     size_t out_pos = 0;
 
@@ -432,6 +486,7 @@ static void ws_read(uint8_t *out, size_t amt) {
     }
 }
 
+// Webscoket handshake - asks the broker to switch the connection from plain TCP/TLS into a WebSocket tunnel that MQTT can ride over.
 static void ws_handshake(void) {
     char req[256];
     snprintf(req, sizeof(req),
@@ -456,6 +511,8 @@ static void ws_handshake(void) {
 }
 
 // ---------------- MQTT packet building ----------------
+// This turns a packet length into the compact format MQTT uses in its headers.
+// It is needed so the broker can tell how big the next message is.
 static size_t encode_remaining_length(uint8_t *out, uint32_t len) {
     size_t n = 0;
     do {
@@ -467,6 +524,8 @@ static size_t encode_remaining_length(uint8_t *out, uint32_t len) {
     return n;
 }
 
+// This builds and sends the MQTT login packet. It tells the broker who the
+// client is and proves the connection should be allowed to continue.
 static void mqtt_connect(void) {
     uint8_t variable_and_payload[256];
     size_t p = 0;
@@ -524,6 +583,8 @@ static void mqtt_connect(void) {
 
 // Publishes a raw binary payload (not a C string) - fit for arbitrary
 // captured packet bytes.
+// This packages a captured packet into an MQTT publish message and sends it to
+// the broker so it can be seen by other subscribers.
 static void mqtt_publish(const char *topic, const uint8_t *payload, size_t payload_len, bool retain) {
     static uint8_t buf[2 + 64 + NETWORK_PKT_MAX_LEN];
     size_t p = 0;
@@ -551,6 +612,8 @@ static void mqtt_publish(const char *topic, const uint8_t *payload, size_t paylo
     ws_write(packet_buf, idx);
 }
 
+// This sends a small MQTT keepalive message. It is needed so the broker knows
+// the client is still alive during quiet times.
 static void mqtt_ping(void) {
     uint8_t packet_buf[2] = {0xC0, 0x00};
     ws_write(packet_buf, sizeof(packet_buf));
@@ -560,14 +623,17 @@ static void mqtt_ping(void) {
 // sent us (PINGRESP etc). We're publish-only, but incoming bytes still need
 // to go through mbedtls_ssl_read so its internal record-parsing state stays
 // correct.
+// This keeps the connection healthy by reading any reply bytes the broker sends
+// back, even though this device is mostly sending data.
 static void mqtt_drain_incoming(void) {
     uint8_t scratch[256];
     mbedtls_ssl_read(&g_ssl, scratch, sizeof(scratch));
 }
 
-// ================================================================
-//  Public API - see network.h
-// ================================================================
+
+// This is the main networking loop. It brings up Wi-Fi, opens the broker
+// connection, sets up TLS and WebSocket, then keeps publishing queued packets
+// while also sending occasional keepalive messages.
 void network_task(void) {
     wifi_connect();
 
