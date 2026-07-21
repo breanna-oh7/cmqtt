@@ -33,14 +33,18 @@ project(cmqtt C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-# Add executable. Source files now live in src/ - just the network.c/network.h
-# test harness, no PIO/ao27 stuff yet.
+# Add executable. main.c wires PIO capture (ao27.c, core0) to the
+# wifi/TLS/MQTT stack (network.c, core1).
 add_executable(cmqtt
-        src/main.c
+        src/ao27.c
         src/network.c
 )
 
-pico_set_program_name(cmqtt "main")
+# Generates src/ao27.pio.h from ao27.pio (rxclock/nrzi/txclock/flag/
+# receiveData/wsled programs) - needed by ao27.c
+pico_generate_pio_header(cmqtt ${CMAKE_CURRENT_LIST_DIR}/src/ao27.pio)
+
+pico_set_program_name(cmqtt "ao27")
 pico_set_program_version(cmqtt "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
@@ -58,12 +62,16 @@ target_compile_definitions(cmqtt PRIVATE
         MBEDTLS_CONFIG_FILE="mbedtls_config.h"
 )
 
-# Add the standard library + wifi/tls/mqtt-support libraries to the build
+# Add the standard library + wifi/tls/mqtt-support + PIO capture/dual-core
+# libraries to the build
 target_link_libraries(cmqtt
         pico_stdlib
-        pico_cyw43_arch_lwip_poll     # single-core polled lwip
+        pico_cyw43_arch_lwip_poll     # single-core polled lwip (runs on core1)
         pico_mbedtls                  # vendored mbedtls (lib/mbedtls submodule)
         pico_rand                     # hardware RNG for entropy seeding
+        hardware_pio                  # ao27.c PIO state machines
+        hardware_clocks               # set_sys_clock_khz
+        pico_multicore                # core1 launch (network_task)
 )
 
 pico_add_extra_outputs(cmqtt)

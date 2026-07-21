@@ -1,0 +1,192 @@
+;/**
+; * Copyright (c) 2026 Michael Wyrick,  N3UC
+; */
+.pio_version 1 // requires version 1 (RP2350,  Pico 2)
+
+; ------------------------------------
+;
+;  PIO 0 sm
+;
+; ------------------------------------
+
+; ------------------------------------
+; Generate the Receive Clock PLL running 16x the baud rate.  Can add, subtract  one 1/16th clock per baud,  or stay the same
+;   SM needs to be set to run 16 times the baud rate
+;   Set interrupt 0 on on sample clock edge
+;   In Pins: data in (1 bit)
+;   Out Pins: n/a
+;   Jmp Pin: n/a
+;   Set Pings: n/a
+;   Side pins: 
+;          pin 0 = Subtract phase       ; Signal that we subtracted a phase
+;          pin 1 = add phase            ; Signal that we inserted a phase
+; ------------------------------------
+.program rxclock
+.clock_div 8125                         ; Expects Sysclock at 156 MHz, for a 1200 baud data rate
+.side_set 2
+sub:
+    nop                      side 1     ; delay one clock
+cont:
+    mov     x pins [4]       side 0     ; Get the input and wait a few clock
+    mov     y pins           side 0     ; Get the input again for compare
+    irq     set 0            side 0     ; Signal SampleClk interrupt
+    jmp     x != y extra [4] side 0     ; Check if the input sample changed, if so, we need to add a clock
+    mov     x pins           side 0     ; Get the input again
+    jmp     x != y sub       side 0     ; Compare it to earler sample, if differnt we need to subtract a clock
+    jmp     cont [1]         side 0     ; No adjustment needed, so just jump back to start
+extra:
+    jmp cont [2]             side 2     ; Need to add a clock so delay an extra amount         
+
+
+; ------------------------------------
+; Generate the TX Clock PLL at the baud rate. 
+;   In Pins: n/a
+;   Out Pins: n/a
+;   Jmp Pin: n/a
+;   Set Pins: tx signaal tocpu1 and tocpu2
+;   Side pins: 
+; ------------------------------------
+.program txclock
+.clock_div 8125                         ; Expects Sysclock at 156 MHz, for a 1200 baud data rate
+.wrap_target
+    wait    1 irq 4    [5]              ; Wait for Sample Clk
+    set     pins 3                      ; output one 
+    wait    1 irq 4    [5]              ; Wait for Sample Clk
+    set     pins 0                      ; output zero and wait for next sample clock
+.wrap
+ 
+
+; ------------------------------------
+; Wait for Interrupt 0 from previous PIO to signal time to sample the data
+;  Can run at full clock speed of the pico
+;   NRZI Decode to set pins
+;   set IRQ 1 when data has been written
+;   In Pins: data in (1 bit)
+;   Out Pins: n/a
+;   Jmp Pin: n/a
+;   Set Pings: NRZI output
+;   Side pins: 
+;          pin 0 = high during wait, low when running
+.program nrzi
+.clock_div 4                        ; Div 4 just so we can see the output pins on our slow Scope
+.side_set 1 opt
+; ------------------------------------
+    jmp     waiti
+.wrap_target
+start:
+    nop     [2]                     ; delay three clocks for data bits to settle
+    irq     set 1                   ; Signal that we decoded a bit
+    mov     x y                     ; Keep value for next compare
+waiti:    
+    wait    1 irq 0         side 1  ; Wait for Sample Clk
+    irq     set 4                   ; signal tx sm
+    mov     y pins          side 0  ; Grab the Input
+    jmp     x != y diff             ; Check if it is different from last sample
+same:         
+    set     pins 1                  ; Same, so output a 1
+    jmp     start                   ; Get ready for next bit
+diff:         
+    set     pins 0                  ; Different, so output a 0
+.wrap               
+
+
+; ------------------------------------
+;
+;  PIO 1 sm
+;
+; ------------------------------------
+
+; ------------------------------------
+; Wait for Interrupt 1 from previous PIO to signal time to sample
+;   set IRQ 3 when flag is detected
+;   In Pins: NRZI decoded data pin
+;   Out Pins: n/a
+;   Jmp Pin: n/a
+;   Set Pings: n/a
+;   Side pins: 
+;          pin 0 = high when current bit is the last bit of a valid flag char
+; ------------------------------------
+.program flag
+.clock_div 4                        ; Div 4 just so we can see the output pins on our slow Scope
+.side_set 1 opt
+.in 1 right
+    pull    block           side 0  ; Get Flag Value from High level Code
+    mov     x osr           side 0  ; Save it in X for ever
+.wrap_target
+waiti:    
+    in      isr 8                   ; put isr back at high bits to prepare for shift
+    irq     set 4                   ; Let unstuffer know we finished
+    wait    1 irq prev 1            ; Wait for Sample Clock interrupt
+    in      pins 1                  ; Grab the new bit
+    in      null 24                 ; move it to low byte (shift in 24 zeros)
+    mov     y isr                   ; Grab the current shifted value
+    jmp     x != y waiti    side 0  ; Compare to a Flag char
+    irq     set 3           side 1  ; FLAG was detected
+.wrap               
+
+; ------------------------------------
+; Wait for Interrupt Zero Unstuff,  only clock outgoing data if not bit stuffed
+;   In Pins: NRZI decoded data pin
+;   Out Pins: n/a
+;   Jmp Pin: n/a
+;   Set Pins: n/a
+;   Side pins: 
+;          pin 0 = data clock
+; ------------------------------------
+.program receiveData
+.clock_div 4                        ; Div 4 just so we can see the output pins on our slow Scope
+.side_set 1
+.in 1 right auto 8                  ; auto push every 8 bits
+resetall:
+    mov     isr, null       side 0  ; clear isr
+.wrap_target
+resetx:
+    set     x (5 - 1)       side 0  ; wait for 5 ones in a row (one less count for x=zero count)
+next1:    
+    wait    1 irq 4    [7]  side 0  ; Wait for flag detector to be done,  wait for input to be stable
+    jmp     pin resetall    side 0  ; check if flag pin is set
+    mov     y pins          side 0  ; grab the input data
+    in      y 1             side 1  ; shift in data bit
+    jmp     !y    resetx    side 0  ; check for a zero
+output1:    
+    jmp     x-- next1       side 1  ; clock out the data but next bit might need to be skipped
+ones5:   
+    wait    1 irq 4    [7]  side 0  ; Wait for flag detector to be done
+    jmp     pin resetall    side 0  ; check if flag pin is set
+    mov     y pins          side 0  ; get input
+    jmp     !y    resetx    side 0  ; skip the zero by not outputting a clock
+    in      y 1             side 1  ; shift in data bit
+.wrap               
+
+; ------------------------------------
+;
+;  PIO 2 sm
+;
+; ------------------------------------
+
+; ------------------------------------
+; WS Led
+;   In Pins: n/a
+;   Out Pins: n/a
+;   Jmp Pin: n/a
+;   Set Pins: n/a
+;   Side pins: 
+;          pin 0 = led data
+; ------------------------------------
+.program wsled
+.define public T1 3
+.define public T2 3
+.define public T3 4
+
+.clock_div 19                        ; 
+.side_set 1
+.out 1 left auto 24                  ; auto push every 24 bits
+.wrap_target
+bitloop:
+    out x, 1       side 0 [T3 - 1] ; Side-set still takes place when instruction stalls
+    jmp !x do_zero side 1 [T1 - 1] ; Branch on the bit we shifted out. Positive pulse
+do_one:
+    jmp  bitloop   side 1 [T2 - 1] ; Continue driving high, for a long pulse
+do_zero:
+    nop            side 0 [T2 - 1] ; Or drive low, for a short pulse
+.wrap

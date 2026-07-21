@@ -1,11 +1,3 @@
-/**
- * WiFi / raw TCP / TLS / WebSocket / MQTT - all owned exclusively by core1.
- *
- * cyw43 + lwIP in NO_SYS=1 poll mode must be driven from one consistent
- * core, so everything in this file (and its internal state) only ever
- * runs on core1. The only door into this module from core0 is
- * network_push_packet(), which is safe to call from IRQ context.
- */
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -635,6 +627,7 @@ static void mqtt_drain_incoming(void) {
 // connection, sets up TLS and WebSocket, then keeps publishing queued packets
 // while also sending occasional keepalive messages.
 void network_task(void) {
+    printf("core1 alive\n");
     wifi_connect();
 
     printf("Connecting to broker...\n");
