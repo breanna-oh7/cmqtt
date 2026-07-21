@@ -14,7 +14,10 @@
 #define MBEDTLS_SSL_SERVER_NAME_INDICATION  // required for mbedtls_ssl_set_hostname() to actually
                                              // add the SNI extension - without it, it's silently a no-op
 
-
+// --- record buffer sizes. IN must be big enough to hold one full TLS record;
+// this broker sends its whole 3-cert Let's Encrypt chain (~4.3KB) as a single
+// certificate record, so 4096 was too small. OUT stays small since our own
+// writes (ClientHello, small MQTT/WS frames) are tiny.
 #define MBEDTLS_SSL_IN_CONTENT_LEN       8192
 #define MBEDTLS_SSL_OUT_CONTENT_LEN      2048
 
@@ -27,7 +30,7 @@
 #define MBEDTLS_PK_PARSE_C
 #define MBEDTLS_OID_C
 
-// --- crypto primitives for common cipher suites (ECDHE-RSA-AES128-GCM-SHA256 etc) ---
+// --- crypto primitives for common cipher suites (ECDHE-RSA-AES-GCM etc, 128 and 256 bit) ---
 #define MBEDTLS_BIGNUM_C
 #define MBEDTLS_RSA_C
 #define MBEDTLS_PKCS1_V15
@@ -60,7 +63,9 @@
 #define MBEDTLS_ENTROPY_C
 #define MBEDTLS_CTR_DRBG_C
 
-//debugg
-// #define MBEDTLS_DEBUG_C
+// NOTE: do NOT #include "mbedtls/check_config.h" here. mbedtls 3.x includes it
+// automatically at the correct point (after it derives things like available
+// key-exchange methods from the primitives above). Including it manually runs
+// validation too early and produces false "prerequisites missing" errors.
 
 #endif /* MBEDTLS_CONFIG_H */

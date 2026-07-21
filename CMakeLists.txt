@@ -33,8 +33,12 @@ project(cmqtt C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-# Add executable. Source now lives in src/main.c instead of the generated cmqtt.c
-add_executable(cmqtt src/main.c)
+# Add executable. Source files now live in src/ - just the network.c/network.h
+# test harness, no PIO/ao27 stuff yet.
+add_executable(cmqtt
+        src/main.c
+        src/network.c
+)
 
 pico_set_program_name(cmqtt "main")
 pico_set_program_version(cmqtt "0.1")
@@ -57,8 +61,9 @@ target_compile_definitions(cmqtt PRIVATE
 # Add the standard library + wifi/tls/mqtt-support libraries to the build
 target_link_libraries(cmqtt
         pico_stdlib
-        pico_cyw43_arch_lwip_poll
-        pico_mbedtls
-        pico_rand
+        pico_cyw43_arch_lwip_poll     # single-core polled lwip
+        pico_mbedtls                  # vendored mbedtls (lib/mbedtls submodule)
+        pico_rand                     # hardware RNG for entropy seeding
 )
+
 pico_add_extra_outputs(cmqtt)
