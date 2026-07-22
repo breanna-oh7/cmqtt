@@ -60,7 +60,11 @@ target_include_directories(cmqtt PRIVATE
 # MBEDTLS_CONFIG_FILE points mbedtls at our trimmed config so it fits in RP2350/RP2040 RAM
 target_compile_definitions(cmqtt PRIVATE
         MBEDTLS_CONFIG_FILE="mbedtls_config.h"
+        CYW43_PIO_CLOCK_DIV_DYNAMIC=1   # sys clock is 156MHz, not the SDK-default 125MHz the
+                                        # fixed cyw43 PIO SPI divisor assumes - must recompute at runtime
 )
+
+
 
 # Add the standard library + wifi/tls/mqtt-support + PIO capture/dual-core
 # libraries to the build

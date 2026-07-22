@@ -9,6 +9,10 @@
 #include "hardware/clocks.h"
 #include "pico/multicore.h" 
 #include "ao27.pio.h"
+#include "pico/cyw43_arch.h"
+
+
+
 
 /*
   PIO Resources:
@@ -212,6 +216,7 @@ void Led_Service() {
         put_pixel(ledStatus[i]);
       }
     }
+
     sleep_ms(100);
   }
 }
@@ -245,8 +250,13 @@ void pio_irq_flag() {
       else
         leds[2] = LEDRED | LED_ONETIME | LED_0_5sec;
 
-      // for(int i=0; i < packetlen; i++) 
-      //   printf("%02X ", packet[i]);
+      for(int i=0; i < packetlen; i++) 
+        printf("%02X ", packet[i]);
+      // printf("%i", packetlen);
+      // if (packetlen == 0 ){
+      //   printf("EMPTY");
+      // }
+    
       switch (packet[0]) {
         case 0x27: leds[1] = LEDMAGENTA;
         break;
@@ -255,8 +265,8 @@ void pio_irq_flag() {
         default: leds[1] = 0x000F0F00 | LED_BLINK | LED_FAST;
         break;
       }
-      // printf("\n");
-      network_push_packet(packet, (uint16_t)packetlen); //instead of printing to the terminal, pushes the entire finished packet  
+      printf("\n");
+      // network_push_packet(packet, (uint16_t)packetlen); //instead of printing to the terminal, pushes the entire finished packet  
     }
     packetlen = 0;
   } else {
@@ -344,23 +354,25 @@ void setupPIO0() {
 // --------------------------------------------------------
 //  PIO 1
 // --------------------------------------------------------
+
 void setupPIO1() {
   printf("<setupPIO1> Start\n");
   PIO pio = pio1;
-  uint sm = 0;
+  uint sm_flag_claimed = pio_claim_unused_sm(pio, true);    //claiming the state machines for the flag and unstuffer so that the cyw43 can be initialized on the next available state machine. 
+    
 
   uint offset_flag = pio_add_program(pio, &flag_program);
 
   pio_sm_config sm_flag = flag_program_get_default_config(offset_flag);
   // Setup GPIO Pins
   // receive data in
-  pio_sm_set_consecutive_pindirs(pio, sm, pinNRZIdecode, 1, false);
+  pio_sm_set_consecutive_pindirs(pio, sm_flag_claimed, pinNRZIdecode, 1, false);
   sm_config_set_in_pins(&sm_flag, pinNRZIdecode);
   sm_config_set_in_pin_count(&sm_flag, 1);
 
   pio_gpio_init(pio, pinFlag);
   pio_gpio_init(pio, pinData);
-  pio_sm_set_consecutive_pindirs(pio, sm, pinFlag, 1, true);
+  pio_sm_set_consecutive_pindirs(pio, sm_flag_claimed, pinFlag, 1, true);
  // pio_sm_set_consecutive_pindirs(pio, sm, pinData, 1, true);
   sm_config_set_sideset_pins(&sm_flag, pinFlag);
 //  sm_config_set_out_pins(&sm_flag, pinData, 1);
@@ -371,44 +383,47 @@ void setupPIO1() {
   pio_set_irq0_source_enabled(pio, pis_interrupt3, true);
 
   // Init
-  pio_sm_init(pio, sm, offset_flag, &sm_flag);  // Init SM
+  pio_sm_init(pio, sm_flag_claimed, offset_flag, &sm_flag);  // Init SM
 
     // unstuffer
-  sm = 1;
+  // sm = 1;
+  uint sm_unstuff_claimed = pio_claim_unused_sm(pio, true);
+
   uint offset_unstuff = pio_add_program(pio, &receiveData_program);
   pio_sm_config sm_unstuff = receiveData_program_get_default_config(offset_unstuff);
   // Setup GPIO Pins
   // receive data in
-  pio_sm_set_consecutive_pindirs(pio, sm, pinNRZIdecode, 1, false);
+  pio_sm_set_consecutive_pindirs(pio, sm_unstuff_claimed, pinNRZIdecode, 1, false);
   sm_config_set_in_pins(&sm_unstuff, pinNRZIdecode);
   sm_config_set_in_pin_count(&sm_unstuff, 1);
 
   // Setup Output Pins
   pio_gpio_init(pio, pinClk);
   pio_gpio_init(pio, pinData);
-  pio_sm_set_consecutive_pindirs(pio, sm, pinClk, 1, true);
-  pio_sm_set_consecutive_pindirs(pio, sm, pinData, 1, true);
+  pio_sm_set_consecutive_pindirs(pio, sm_unstuff_claimed, pinClk, 1, true);
+  pio_sm_set_consecutive_pindirs(pio, sm_unstuff_claimed, pinData, 1, true);
   sm_config_set_sideset_pins(&sm_unstuff, pinClk);
   sm_config_set_jmp_pin(&sm_unstuff, pinFlag);
   
-  pio_sm_init(pio, sm, offset_unstuff, &sm_unstuff);
+  pio_sm_init(pio, sm_unstuff_claimed, offset_unstuff, &sm_unstuff);
 
   irq_set_exclusive_handler(PIO1_IRQ_1, pio_irq_data);
   irq_set_enabled(PIO1_IRQ_1, true);
   pio_set_irq1_source_enabled(pio, pis_sm1_rx_fifo_not_empty, true);
 
   pio_enable_sm_mask_in_sync(pio, 0x03);        // Enable SM
+  pio_enable_sm_mask_in_sync(pio, (1u << sm_flag_claimed) | (1u << sm_unstuff_claimed));
   pio->txf[0] = 0x0000007E;                    // Put Flag Char into FIFO
 
   printf("<setupPIO1> End\n");
 }
 
 // --------------------------------------------------------
-//  PIO 1
+//  PIO 2
 // --------------------------------------------------------
 void setupPIO2() {
   PIO pio = pio2;
-  uint sm = 0;
+  uint sm = 1;
 
   pio_gpio_init(pio, pinWSLed);
   pio_sm_set_consecutive_pindirs(pio, sm, pinWSLed, 1, true);
@@ -423,10 +438,13 @@ void setupPIO2() {
   pio_sm_set_enabled(pio, sm, true);
 }
 
+static uint32_t core1_stack[8192]; // 8192 uint32_t = 32768 bytes - mbedtls/lwIP/cyw43 need real headroom
 // --------------------------------------------------------
 //    main
 // --------------------------------------------------------
-   int main() {
+
+
+int main() {
   set_sys_clock_khz(156000, true);
   setup_default_uart();
   stdio_init_all();    
@@ -436,11 +454,11 @@ void setupPIO2() {
   }
   sleep_ms(500);
   printf("AO-27 Bench CPU Pico\n");
-  
-  // Setup FromCPU pin as Input with internal pull up
+
   gpio_init(pinFromCPU);
   gpio_set_dir(pinFromCPU, GPIO_IN);
   gpio_pull_up(pinFromCPU); 
+
 
   setupPIO0();
   setupPIO1();
@@ -450,13 +468,16 @@ void setupPIO2() {
   leds[1] = LEDOFF;
   leds[2] = LEDOFF;
   
-  multicore_launch_core1(network_task);
+  sleep_ms(2000);
+  // 4. Launch Core 1 using custom stack array in RAM
+  // multicore_launch_core1_with_stack(network_task, core1_stack, sizeof(core1_stack));
+  multicore_launch_core1(Led_Service);
+  // 5. Run LED servicing on Core 0
+  // Led_Service();
+  // return 0;
+  while(1) {
+    printf("\nFlag Count: %i,  Data Count: %i, unknown0: %i, unknown1: %i\n", flagcount, datacount, pio1unknownIRQ0, pio1unknownIRQ1);
 
-  Led_Service();
-  return 0;
-//   while(1) {
-// //   printf("\nFlag Count: %i,  Data Count: %i, unknown0: %i, unknown1: %i\n", flagcount, datacount, pio1unknownIRQ0, pio1unknownIRQ1);
-//    sleep_ms(1000);
-//   }
+   sleep_ms(1000);
+  }
 }
-

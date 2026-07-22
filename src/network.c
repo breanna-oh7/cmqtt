@@ -18,6 +18,8 @@
 
 #include "network.h"
 #include "mbedtls_config.h"
+#include "pico/cyw43_driver.h"
+#include "hardware/clocks.h"
 
 // ================================================================
 //  Definitions - Define the Wifi Network, Password, Broker, Port, Path, and topic
@@ -121,17 +123,22 @@ static void mbedtls_die(const char *msg, int ret) {
 
 // Connects the Pico to Wi-Fi using the Wifi name and definition
 static void wifi_connect(void) {
-    if (cyw43_arch_init()) {
-        net_die("cyw43_arch_init failed");  
-    }
-    cyw43_arch_enable_sta_mode(); //enables wifi station mode
+    cyw43_arch_lwip_begin();
+    cyw43_arch_enable_sta_mode();
+    cyw43_arch_lwip_end();
 
     printf("Connecting to wifi: %s\n", HOME_WIFI);
+    fflush(stdout);
+
+    cyw43_arch_lwip_begin();
     int rc = cyw43_arch_wifi_connect_timeout_ms(HOME_WIFI, HOME_PASS, CYW43_AUTH_WPA2_AES_PSK, 30000);
+    cyw43_arch_lwip_end();
+
     if (rc) {
         net_die("wifi connect failed/timed out");
     }
     printf("Connected. IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
+    fflush(stdout);
 }
 
 // ---------------- DNS (raw API) ----------------
@@ -150,6 +157,7 @@ static void dns_found_cb(const char *name, const ip_addr_t *ipaddr, void *arg) {
 // since broker is named by text, not number.
 static bool resolve_host(const char *host, ip_addr_t *out) {
     g_dns_done = false;
+    // printf("Debuf: DNS lookup in progress");
     cyw43_arch_lwip_begin();
     err_t err = dns_gethostbyname(host, out, dns_found_cb, NULL);
     cyw43_arch_lwip_end();
@@ -226,9 +234,12 @@ static err_t on_tcp_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
 //  TLS steps cannot start without a live socket.
 static void tcp_connect_blocking(const char *host, int port) {
     ip_addr_t addr;
+    // printf("Debug");
     if (!resolve_host(host, &addr)) {
         net_die("DNS lookup failed");
     }
+    // printf("Debuf: DNS resolved");
+
 
     memset(&g_conn, 0, sizeof(g_conn));
 
@@ -266,16 +277,20 @@ static void tcp_connect_blocking(const char *host, int port) {
 
 // This is the send side for the TLS layer. It takes bytes from mbedtls and
 // pushes them onto the TCP connection, which is how secure traffic leaves the device.
+
+
 static int net_send(void *ctx, const unsigned char *buf, size_t len) {
     (void)ctx;
-    cyw43_arch_poll();
     if (g_conn.error) {
         return NET_SEND_FAILED;
     }
+
+    cyw43_arch_lwip_begin();
     if (tcp_sndbuf(g_conn.pcb) < len) {
+        cyw43_arch_lwip_end();
         return MBEDTLS_ERR_SSL_WANT_WRITE;
     }
-    cyw43_arch_lwip_begin();
+
     err_t err = tcp_write(g_conn.pcb, buf, (u16_t)len, TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) tcp_output(g_conn.pcb);
     cyw43_arch_lwip_end();
@@ -284,11 +299,8 @@ static int net_send(void *ctx, const unsigned char *buf, size_t len) {
     return (int)len;
 }
 
-// Receive side for the TLS layer that gives mbedtls bytes that
-// were already collected from the TCP connection so it can keep reading safely.
 static int net_recv(void *ctx, unsigned char *buf, size_t len) {
     (void)ctx;
-    cyw43_arch_poll();
     if (g_conn.error) return MBEDTLS_ERR_SSL_CONN_EOF;
 
     size_t avail = g_conn.rx_len - g_conn.rx_head;
@@ -299,7 +311,6 @@ static int net_recv(void *ctx, unsigned char *buf, size_t len) {
     g_conn.rx_head += n;
     return (int)n;
 }
-
 // pico has no OS entropy source -> feed the hardware RNG into mbedtls
 // Provides random bytes to the TLS library. It is needed because the
 // secure connection uses those bytes when creating keys and other crypto material.
@@ -349,6 +360,10 @@ static void tls_wrap(void) {
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             mbedtls_die("tls handshake failed", ret);
         }
+        // poll-mode lwIP only feeds rx data into the stack when polled -
+        // without this, net_recv() sees an empty buffer forever and we spin here.
+        cyw43_arch_poll();
+        sleep_ms(1);
     }
     printf("TLS handshake complete.\n");
 }
@@ -359,7 +374,11 @@ static int tls_write_all(const uint8_t *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         int ret = mbedtls_ssl_write(&g_ssl, data + sent, len - sent);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            cyw43_arch_poll();
+            sleep_ms(1);
+            continue;
+        }
         if (ret < 0) mbedtls_die("tls write failed", ret);
         sent += ret;
     }
@@ -372,7 +391,11 @@ static int tls_read_exact(uint8_t *out, size_t len) {
     size_t got = 0;
     while (got < len) {
         int ret = mbedtls_ssl_read(&g_ssl, out + got, len - got);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            cyw43_arch_poll();
+            sleep_ms(1);
+            continue;
+        }
         if (ret <= 0) mbedtls_die("tls read failed", ret);
         got += ret;
     }
@@ -386,7 +409,11 @@ static int tls_read_line(char *out, size_t max) {
     while (i < max - 1) {
         uint8_t c;
         int ret = mbedtls_ssl_read(&g_ssl, &c, 1);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            cyw43_arch_poll();
+            sleep_ms(1);
+            continue;
+        }
         if (ret <= 0) mbedtls_die("tls read (line) failed", ret);
         out[i++] = (char)c;
         if (c == '\n') break;
@@ -628,29 +655,43 @@ static void mqtt_drain_incoming(void) {
 // while also sending occasional keepalive messages.
 void network_task(void) {
     printf("core1 alive\n");
+    fflush(stdout);
+
+    // cyw43_arch (poll mode) is not cross-core safe: init must happen on the
+    // same core that drives every subsequent cyw43/lwIP call. Everything in
+    // this file runs on core1, so init happens here, not in main() on core0.
+    if (cyw43_arch_init()) {
+        net_die("cyw43 init failed");
+    }
+
     wifi_connect();
 
     printf("Connecting to broker...\n");
+    fflush(stdout);
+
     tcp_connect_blocking(BROKER_HOST, BROKER_PORT);
     tls_wrap();
     ws_handshake();
     mqtt_connect();
 
     printf("Ready - publishing captured packets to '%s'\n", MQTT_TOPIC);
+    fflush(stdout);
 
     static uint8_t pkt_buf[NETWORK_PKT_MAX_LEN];
     uint16_t pkt_len;
     absolute_time_t last_ping = get_absolute_time();
 
     while (1) {
+        // We're linked against pico_cyw43_arch_lwip_poll (not threadsafe_background),
+        // so this poll call is required - nothing else drives the driver/lwIP here.
         cyw43_arch_poll();
 
         while (pkt_queue_pop(pkt_buf, &pkt_len)) {
             mqtt_publish(MQTT_TOPIC, pkt_buf, pkt_len, false);
             printf("Published packet (%u bytes)\n", pkt_len);
+            fflush(stdout);
         }
 
-        // keep the broker's 60s keepalive happy during quiet periods
         if (absolute_time_diff_us(last_ping, get_absolute_time()) > 30 * 1000 * 1000) {
             mqtt_ping();
             last_ping = get_absolute_time();
