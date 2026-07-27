@@ -23,6 +23,7 @@
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/error.h"
+#include "mbedtls/base64.h"
 
 #include "network.h"
 #include "mbedtls_config.h"
@@ -268,7 +269,9 @@ static void tcp_connect_blocking(const char *host, int port) {
     absolute_time_t deadline = make_timeout_time_ms(10000);
     absolute_time_t last_heartbeat = get_absolute_time();
     while (!g_conn.connected && !g_conn.error) {
-        cyw43_arch_poll();
+        for (int i = 0; i < 20; i++){
+            cyw43_arch_poll();
+        }
         sleep_ms(1);
         if (absolute_time_diff_us(last_heartbeat, get_absolute_time()) > 1 * 1000 * 1000) {
             printf("  ... still waiting (connected=%d error=%d)\n",
@@ -312,7 +315,9 @@ static int net_send(void *ctx, const unsigned char *buf, size_t len) {
 // were already collected from the TCP connection so it can keep reading safely.
 static int net_recv(void *ctx, unsigned char *buf, size_t len) {
     (void)ctx;
+    // for (int i = 0; i < 10; i++){
     cyw43_arch_poll();
+    // }
     if (g_conn.error) return MBEDTLS_ERR_SSL_CONN_EOF;
 
     size_t avail = g_conn.rx_len - g_conn.rx_head;
@@ -638,12 +643,12 @@ static void mqtt_connect(void) {
     printf("MQTT connected\n");
 }
 
-// Publishes a raw binary payload (not a C string) - fit for arbitrary
-// captured packet bytes.
-// This packages a captured packet into an MQTT publish message and sends it to
+#define JSON_PAYLOAD_MAX  ((((NETWORK_PKT_MAX_LEN) + 2) / 3) * 4 + 64)
+
+// packages a captured packet into an MQTT publish message and sends it to
 // the broker so it can be seen by other subscribers.
 static void mqtt_publish(const char *topic, const uint8_t *payload, size_t payload_len, bool retain) {
-    static uint8_t buf[2 + 64 + NETWORK_PKT_MAX_LEN];
+    static uint8_t buf[2 + 64 + JSON_PAYLOAD_MAX + 64];
     size_t p = 0;
 
     uint16_t tlen = (uint16_t)strlen(topic);
@@ -669,6 +674,33 @@ static void mqtt_publish(const char *topic, const uint8_t *payload, size_t paylo
     ws_write(packet_buf, idx);
 }
 
+// publishes the packet data in base64 encoded form. 
+// no timestamp or length 
+static void mqtt_publish_packet_json(const char *topic, const uint8_t *data, uint16_t len) {
+    static char b64[JSON_PAYLOAD_MAX];
+    // size_t b64_len = 0;
+
+    // int ret = mbedtls_base64_encode((unsigned char *)b64, sizeof(b64), &b64_len, data, len);
+    // if (ret != 0) {
+    //     printf("base64 encode failed (ret=%d), dropping packet\n", ret);
+    //     return;
+    // }
+    // b64[b64_len] = '\0';
+
+    // uint32_t timestamp = (uint32_t)(to_us_since_boot(get_absolute_time()) / 1000000ULL);
+
+    static char json[JSON_PAYLOAD_MAX + 64];
+    int n = snprintf(json, sizeof(json),
+        "%s",
+         data);
+    if (n <= 0 || (size_t)n >= sizeof(json)) {
+        printf("json build failed/overflowed, dropping packet\n");
+        return;
+    }
+
+    mqtt_publish(topic, (const uint8_t *)json, (size_t)n, true); //
+}
+
 // This sends a small MQTT keepalive message. It is needed so the broker knows
 // the client is still alive during quiet times.
 static void mqtt_ping(void) {
@@ -676,12 +708,7 @@ static void mqtt_ping(void) {
     ws_write(packet_buf, sizeof(packet_buf));
 }
 
-// Non-blocking: opportunistically pulls and discards any bytes the broker
-// sent us (PINGRESP etc). We're publish-only, but incoming bytes still need
-// to go through mbedtls_ssl_read so its internal record-parsing state stays
-// correct.
-// This keeps the connection healthy by reading any reply bytes the broker sends
-// back, even though this device is mostly sending data.
+
 static void mqtt_drain_incoming(void) {
     uint8_t scratch[256];
     mbedtls_ssl_read(&g_ssl, scratch, sizeof(scratch));
@@ -707,10 +734,12 @@ void network_task(void) {
     absolute_time_t last_ping = get_absolute_time();
 
     while (1) {
+        // for (int i = 0; i < 10; i ++ ){
         cyw43_arch_poll();
+        // }
 
         while (pkt_queue_pop(pkt_buf, &pkt_len)) {
-            mqtt_publish(MQTT_TOPIC, pkt_buf, pkt_len, false);
+            mqtt_publish_packet_json(MQTT_TOPIC, pkt_buf, pkt_len);
             printf("Published packet (%u bytes)\n", pkt_len);
         }
 

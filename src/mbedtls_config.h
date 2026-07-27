@@ -59,6 +59,11 @@
                            // SHA512_C alone doesn't imply this in newer mbedtls
 #define MBEDTLS_SHA512_C
 
+// --- base64 - used to encode raw captured packet bytes into ASCII-safe
+// text for the JSON/MQTT payload (raw binary shows up as black diamonds/
+// replacement characters in text-based MQTT viewers otherwise) ---
+#define MBEDTLS_BASE64_C
+
 // --- RNG ---
 #define MBEDTLS_ENTROPY_C
 #define MBEDTLS_CTR_DRBG_C

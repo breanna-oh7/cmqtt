@@ -2,6 +2,7 @@
  * Copyright (c) 2026 Michael Wyrick,  N3UC
  */
 #include <stdio.h>
+#include <stdbool.h>
 #include <string.h>
 #include "pico/stdlib.h"
 #include "network.h"
@@ -232,6 +233,13 @@ uint pio1unknownIRQ1 = 0;
 uint8_t packet[1024];
 int packetlen = 0;
 
+// Deferred printing: the ISR only ever copies into this, never calls printf.
+// The main loop drains it. volatile because it's written in IRQ context and
+// read in the foreground loop.
+static uint8_t  printbuf[1024];
+static volatile int printbuf_len = 0;
+static volatile bool printbuf_ready = false;
+
 // --------------------------------------------------------
 //  Flag IRQ Handler
 // --------------------------------------------------------
@@ -250,13 +258,14 @@ void pio_irq_flag() {
       else
         leds[2] = LEDRED | LED_ONETIME | LED_0_5sec;
 
-      // for(int i=0; i < packetlen; i++) 
-      //   printf("%02X ", packet[i]);
-      // printf("%i", packetlen);
-      // if (packetlen == 0 ){
-      //   printf("EMPTY");
+      
+      // if (!printbuf_ready) {
+      //   int n = packetlen < (int)sizeof(printbuf) ? packetlen : (int)sizeof(printbuf);
+      //   memcpy(printbuf, packet, n);
+      //   printbuf_len = n;
+      //   printbuf_ready = true;
       // }
-    
+
       switch (packet[0]) {
         case 0x27: leds[1] = LEDMAGENTA;
         break;
@@ -265,8 +274,10 @@ void pio_irq_flag() {
         default: leds[1] = 0x000F0F00 | LED_BLINK | LED_FAST;
         break;
       }
-      // printf("\n");
-      network_push_packet(packet, (uint16_t)packetlen); //instead of printing to the terminal, pushes the entire finished packet  
+
+      if (packetlen >= 8) {
+        network_push_packet(packet, (uint16_t)packetlen); //instead of printing to the terminal, pushes the entire finished packet
+      }
     }
     packetlen = 0;
   } else {
@@ -362,6 +373,7 @@ void setupPIO1() {
   printf("<setupPIO1> Start\n");
   PIO pio = pio1;
   
+  // uint sm_flag_claimed = 0;
   uint sm_flag_claimed = 2;
   uint sm_unstuff_claimed = 1;
 
@@ -392,7 +404,7 @@ void setupPIO1() {
   // Init
   pio_sm_init(pio, sm_flag_claimed, offset_flag, &sm_flag);  // Init SM
 
-    // unstuffer
+  // unstuffer
   // sm = 1;
   
 
@@ -446,14 +458,6 @@ void setupPIO2() {
   pio_sm_set_enabled(pio, sm, true);
 }
 
-// format the time struct here, or the data struct 
-// struct timespec get_time(){
-//   struct specs;
-//   clock_gettime(CLOCK_REALTIME, &specs);
-//   return specs;
-// }
-
-
 static uint32_t core1_stack[8192]; // 8192 uint32_t = 32768 bytes - mbedtls/lwIP/cyw43 need real headroom
 // --------------------------------------------------------
 //    main
@@ -471,35 +475,9 @@ int main() {
   sleep_ms(500);
   printf("AO-27 Bench CPU Pico\n");
 
-  // What actually caused the *previous* reset - tells us if the earlier
-  // crashes were a brownout/power glitch, a watchdog timeout, or a normal
-  // power-on/RUN-pin reset.
-  uint32_t chip_reset = powman_hw->chip_reset;
-  printf("Reset cause: chip_reset=0x%08lx watchdog_caused_reboot=%d\n",
-         (unsigned long)chip_reset, (int)watchdog_caused_reboot());
-#ifdef POWMAN_CHIP_RESET_HAD_BOR_BITS
-  if (chip_reset & POWMAN_CHIP_RESET_HAD_BOR_BITS)
-    printf("  -> BROWN-OUT reset (power rail sagged below threshold)\n");
-#endif
-#ifdef POWMAN_CHIP_RESET_HAD_GLITCH_DETECT_BITS
-  if (chip_reset & POWMAN_CHIP_RESET_HAD_GLITCH_DETECT_BITS)
-    printf("  -> POWER GLITCH detected\n");
-#endif
-#ifdef POWMAN_CHIP_RESET_HAD_POR_BITS
-  if (chip_reset & POWMAN_CHIP_RESET_HAD_POR_BITS)
-    printf("  -> normal power-on reset\n");
-#endif
-#ifdef POWMAN_CHIP_RESET_HAD_RUN_BITS
-  if (chip_reset & POWMAN_CHIP_RESET_HAD_RUN_BITS)
-    printf("  -> RUN pin / reset button\n");
-#endif
-  if (watchdog_caused_reboot())
-    printf("  -> WATCHDOG reset (code hung and the watchdog fired)\n");
-
   gpio_init(pinFromCPU);
   gpio_set_dir(pinFromCPU, GPIO_IN);
   gpio_pull_up(pinFromCPU); 
-
 
   setupPIO0();
   setupPIO1();
@@ -510,14 +488,23 @@ int main() {
   leds[2] = LEDOFF;
   
   sleep_ms(2000);
-  // 4. Launch Core 1 using custom stack array in RAM
+  // Launching the network stuff on the other core 
   multicore_launch_core1_with_stack(network_task, core1_stack, sizeof(core1_stack));
-  // multicore_launch_core1(Led_Service);
-  // 5. Run LED servicing on Core 0
   Led_Service();
+
+  //uncomment this to ONLY print the data in serial monitor
+  // multicore_launch_core1(Led_Service);
+
   // return 0;
   while(1) {
     // printf("\nFlag Count: %i,  Data Count: %i, unknown0: %i, unknown1: %i\n", flagcount, datacount, pio1unknownIRQ0, pio1unknownIRQ1);
+
+    // if (printbuf_ready) {
+    //   int n = printbuf_len;
+    //   for (int i = 0; i < n; i++) printf("%02X ", printbuf[i]);
+    //   printf("\n");
+    //   printbuf_ready = false;   // clear last - ISR checks this before writing again
+    // }
 
    sleep_ms(1000);
   }

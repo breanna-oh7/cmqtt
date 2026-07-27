@@ -33,6 +33,7 @@ project(cmqtt C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
+
 # Add executable. main.c wires PIO capture (ao27.c, core0) to the
 # wifi/TLS/MQTT stack (network.c, core1).
 add_executable(cmqtt
@@ -76,6 +77,7 @@ target_link_libraries(cmqtt
         hardware_pio                  # ao27.c PIO state machines
         hardware_clocks               # set_sys_clock_khz
         pico_multicore                # core1 launch (network_task)
+        
 )
 
 pico_add_extra_outputs(cmqtt)
