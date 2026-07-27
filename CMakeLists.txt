@@ -2,12 +2,14 @@
 
 cmake_minimum_required(VERSION 3.13)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Initialise pico_sdk from installed location
-# (note this can come from environment, CMake cache etc)
 
 # == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
 if(WIN32)
@@ -33,19 +35,17 @@ project(cmqtt C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-
-# Add executable. main.c wires PIO capture (ao27.c, core0) to the
-# wifi/TLS/MQTT stack (network.c, core1).
+# Add executables ao27.c and network.c to run on both cores
 add_executable(cmqtt
-        src/ao27.c
         src/network.c
+        src/ao27.c
 )
 
 # Generates src/ao27.pio.h from ao27.pio (rxclock/nrzi/txclock/flag/
 # receiveData/wsled programs) - needed by ao27.c
 pico_generate_pio_header(cmqtt ${CMAKE_CURRENT_LIST_DIR}/src/ao27.pio)
 
-pico_set_program_name(cmqtt "ao27")
+pico_set_program_name(cmqtt "main")
 pico_set_program_version(cmqtt "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
@@ -61,11 +61,7 @@ target_include_directories(cmqtt PRIVATE
 # MBEDTLS_CONFIG_FILE points mbedtls at our trimmed config so it fits in RP2350/RP2040 RAM
 target_compile_definitions(cmqtt PRIVATE
         MBEDTLS_CONFIG_FILE="mbedtls_config.h"
-        CYW43_PIO_CLOCK_DIV_DYNAMIC=1   # sys clock is 156MHz, not the SDK-default 125MHz the
-                                        # fixed cyw43 PIO SPI divisor assumes - must recompute at runtime
 )
-
-
 
 # Add the standard library + wifi/tls/mqtt-support + PIO capture/dual-core
 # libraries to the build
@@ -77,7 +73,6 @@ target_link_libraries(cmqtt
         hardware_pio                  # ao27.c PIO state machines
         hardware_clocks               # set_sys_clock_khz
         pico_multicore                # core1 launch (network_task)
-        
 )
 
 pico_add_extra_outputs(cmqtt)

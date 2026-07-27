@@ -1,13 +1,20 @@
 # Cores
 This program runs two programs: ao27.c on core0, and network.c on core1. 
 
-ao27.c contains the low-level PIO Assembly that handles the recieve/transmit clock, NRZI decoding, flag detecting, zero unstuffing, and wsled api. 
+ao27.c contains the low-level PIO Assembly that handles:
+- recieve/transmit clock
+- NRZI decoding
+- flag detecting
+- zero unstuffing
+- wsled api. 
+
 Once the packet, which is identified by being in between two flags, 0x7E (01111110), it's pushed to a queue to be published by MQTT in network.c
 
 network.c uses mbedtls, lwipopts, and cyw43 to handle the connection to wifi (in this case an iPhone hotspot), connecting to the MQTT Explorer Broker, the WebSocket Handshake, base64 encoding the data, and publishing the packet to MQTT. 
 
 Note: 
-- when connecting to wifi, hotspot usually works best. Make sure to turn on "Maximize Compatibility" (allows 5GHz signal from hotspot to be read by the pico, which oeprates at a lower frequency)
+- When connecting to wifi, hotspot usually works best. 
+  - Make sure to turn on "Maximize Compatibility" (allows 5GHz signal from hotspot to be read by the pico, which oeprates at a lower frequency)
 
 ## PIO Resources:
     PIO 0
