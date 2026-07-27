@@ -15,7 +15,17 @@ network.c uses mbedtls, lwipopts, and cyw43 to handle the connection to wifi (in
 Note: 
 - When connecting to wifi, hotspot usually works best. 
   - Make sure to turn on "Maximize Compatibility" (allows 5GHz signal from hotspot to be read by the pico, which oeprates at a lower frequency)
+# Core1 / network.c
+## Configurations in cetwork.C 
+Ctrl + F and paste the following to find and set configurations 
 
+- DEFINE WIFI : Setup the WiFi ID and Password. Note that when using a Hotspot, to change the password so it doesn't have apostrophe's 
+  - Ex: instead of JohnDoe'sPhone, just do JohnDoePhone
+- DEFINE BROKER : Setup the MQTT Explorer Broker parameters, such host, port, ws path, etc. 
+
+## network.c
+
+# Core0 / ao27.c
 ## PIO Resources:
     PIO 0
       sm 0    Rx CLK PLL
@@ -85,5 +95,3 @@ Note:
           x           1 = counting down
     x                 0 = on, 1 = off
 
-
-## network.c 

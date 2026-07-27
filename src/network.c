@@ -32,16 +32,17 @@
 //  Definitions - Define the Wifi Network, Password, Broker, Port, Path, and topic
 // ================================================================
 #define PKT_QUEUE_LEN   8
+// DEFINE WIFI ID AND PASSWORD HERE
 #define HOME_WIFI      "Breanna"
 #define HOME_PASS      "BreannaOh"
 
+//DEFINE BROKER
 #define BROKER_HOST    "ao27.net"
 #define BROKER_PORT    443
 #define WS_PATH        "/mqtt"
 #define CLIENT_ID      "pico_2w_client"
 #define MQTT_USER      "ao27"
 #define MQTT_PASS      "ao27passwd"
-
 #define MQTT_TOPIC     "ao27/pico/data"
 
 typedef struct {
