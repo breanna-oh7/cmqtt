@@ -643,6 +643,7 @@ static void mqtt_connect(void) {
     printf("MQTT connected\n");
 }
 
+
 #define JSON_PAYLOAD_MAX  ((((NETWORK_PKT_MAX_LEN) + 2) / 3) * 4 + 64)
 
 // packages a captured packet into an MQTT publish message and sends it to
@@ -678,21 +679,19 @@ static void mqtt_publish(const char *topic, const uint8_t *payload, size_t paylo
 // no timestamp or length 
 static void mqtt_publish_packet_json(const char *topic, const uint8_t *data, uint16_t len) {
     static char b64[JSON_PAYLOAD_MAX];
-    // size_t b64_len = 0;
+    size_t b64_len = 0;
 
-    // int ret = mbedtls_base64_encode((unsigned char *)b64, sizeof(b64), &b64_len, data, len);
-    // if (ret != 0) {
-    //     printf("base64 encode failed (ret=%d), dropping packet\n", ret);
-    //     return;
-    // }
-    // b64[b64_len] = '\0';
+    int ret = mbedtls_base64_encode((unsigned char *)b64, sizeof(b64), &b64_len, data, len);
+    if (ret != 0) {
+        printf("base64 encode failed (ret=%d), dropping packet\n", ret);
+        return;
+    }
+    b64[b64_len] = '\0';
 
     // uint32_t timestamp = (uint32_t)(to_us_since_boot(get_absolute_time()) / 1000000ULL);
 
     static char json[JSON_PAYLOAD_MAX + 64];
-    int n = snprintf(json, sizeof(json),
-        "%s",
-         data);
+    int n = snprintf(json, sizeof(json), "%s", b64);
     if (n <= 0 || (size_t)n >= sizeof(json)) {
         printf("json build failed/overflowed, dropping packet\n");
         return;
@@ -714,12 +713,11 @@ static void mqtt_drain_incoming(void) {
     mbedtls_ssl_read(&g_ssl, scratch, sizeof(scratch));
 }
 
+// main network function ran on the second core, called in ao27.c
+// connects to wifi, connects to broker, sets up TLS and WebSocket, then keeps publishing queued packets
 
-// This is the main networking loop. It brings up Wi-Fi, opens the broker
-// connection, sets up TLS and WebSocket, then keeps publishing queued packets
-// while also sending occasional keepalive messages.
 void network_task(void) {
-    wifi_connect();
+    wifi_connect();         //connecting to wifi 
 
     printf("Connecting to broker...\n");
     tcp_connect_blocking(BROKER_HOST, BROKER_PORT);
