@@ -384,12 +384,37 @@ void setupPIO2() {
   pio_sm_set_enabled(pio, sm, true);
 }
 
+//starting on data manipulation (not really needed )
+
+// # include <math.h>
+// #include <time.h>
+// uint8_t wavegen(double min, double max, double period, double phase){
+//   struct timespec ts;
+//   timespec_get(&ts, TIME_UTC);
+//   double now = (double)ts.tv_sec + ((double)ts.tv_nsec / 1e9);
+
+//   double pi = acos(-1.0);
+
+//   double radians = 2.0 * pi * now/period + phase;
+//   double sineVal = sin(radians);
+
+//   double amplitude = (max - min) / 2.0;
+//   double mid = (max + min) / 2.0;
+
+//   return (uint8_t) ((int8_t)mid + amplitude * sineVal);
+// }
+// #define TELEMETRY_SIZE 40 //40 bytes of telemetry data 
+// size_t generatePacket(){
+//   uint32_t slice[TELEMETRY_SIZE];
+  
+// }
+
+
+
 static uint32_t core1_stack[8192]; // 8192 uint32_t = 32768 bytes - mbedtls/lwIP/cyw43 need real headroom
 // --------------------------------------------------------
 //    main
 // --------------------------------------------------------
-
-
 int main() {
   set_sys_clock_khz(156000, true);
   setup_default_uart();
