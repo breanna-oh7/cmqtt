@@ -368,7 +368,7 @@ void setupPIO1() {
 // --------------------------------------------------------
 void setupPIO2() {
   PIO pio = pio2;
-  uint sm = 1;
+  uint sm = 0;
   pio_sm_claim(pio, sm);
 
   pio_gpio_init(pio, pinWSLed);

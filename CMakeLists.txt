@@ -49,8 +49,10 @@ pico_set_program_name(cmqtt "main")
 pico_set_program_version(cmqtt "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(cmqtt 0)
-pico_enable_stdio_usb(cmqtt 1)
+pico_enable_stdio_uart(cmqtt 1)
+pico_enable_stdio_usb(cmqtt 0)
+# modified so that it can flash code via the C debugger rather than
+# printing to the serial monitor.
 
 # Add the standard include files to the build
 target_include_directories(cmqtt PRIVATE
