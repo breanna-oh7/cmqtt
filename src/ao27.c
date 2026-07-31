@@ -419,10 +419,10 @@ int main() {
   set_sys_clock_khz(156000, true);
   setup_default_uart();
   stdio_init_all();    
-
-  while (!stdio_usb_connected()) {
-    sleep_ms(100);
-  }
+  //commented out to prevent usb and use the  c debugger instead 
+  // while (!stdio_usb_connected()) {
+  //   sleep_ms(100);
+  // }
   sleep_ms(500);
   printf("AO-27 Bench CPU Pico\n");
 
